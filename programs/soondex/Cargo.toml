@@ -1,0 +1,34 @@
+[package]
+name = "soondex"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "soondex"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = [
+    "anchor-lang/idl-build",
+    "anchor-spl/idl-build",
+]
+
+[dependencies]
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"]  }
+anchor-spl = { version = "0.30.1", features = ["associated_token"] }
+bonfida-utils = "0.4"
+integer-sqrt = "0.1.5"
+solana-program = "1.16.0"
+borsh = "1.5.1"
+borsh-derive = "1.5.1"
+
+[dev-dependencies]
+assert_matches = "1.5.0"
+solana-logger = "=2.0.2"
+solana-program-test = "1.16.0"
