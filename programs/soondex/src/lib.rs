@@ -592,7 +592,11 @@ pub struct InitializePool<'info> {
         init,
         payer = payer,
         space = 8 + std::mem::size_of::<LiquidityPool>(),
-        seeds = [POOL_SEED],
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
         bump
     )]
     pub pool: Account<'info, LiquidityPool>,

@@ -30,37 +30,31 @@ pub mod soondex {
     use super::*;
     pub fn initialize_pool(
         ctx: Context<InitializePool>,
+        token_x_mint: Pubkey,
+        token_y_mint: Pubkey,
         fee_rate: u64,
         reward_rate: u64,
     ) -> Result<()> {
         // CHECKS
-        // 1. Validate input rates
+        // 1. Validate input rates and tokens
         require!(fee_rate <= MAX_FEE_RATE, ErrorCode::InvalidFeeRate);
         require!(reward_rate <= MAX_REWARD_RATE, ErrorCode::InvalidRewardRate);
-    
-        // 2. Protocol fee collection
-        let protocol_fee = ctx.accounts.payer.to_account_info();
-        let protocol_wallet = ctx.accounts.protocol_wallet.to_account_info();
+        require!(
+            ctx.accounts.token_x_mint.key() == token_x_mint,
+            ErrorCode::InvalidToken
+        );
+        require!(
+            ctx.accounts.token_y_mint.key() == token_y_mint,
+            ErrorCode::InvalidToken
+        );
         
-        // Verify and transfer protocol fee
-        **protocol_fee.try_borrow_mut_lamports()? = protocol_fee
-            .lamports()
-            .checked_sub(PROTOCOL_FEE_LAMPORTS)
-            .ok_or(ErrorCode::InsufficientFunds)?;
-        
-        **protocol_wallet.try_borrow_mut_lamports()? = protocol_wallet
-            .lamports()
-            .checked_add(PROTOCOL_FEE_LAMPORTS)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let pool = &mut ctx.accounts.pool;
     
         // EFFECTS
         // 1. Initialize pool state
-        let pool = &mut ctx.accounts.pool;
-        pool.authority = ctx.accounts.payer.key();
+        pool.authority = ctx.accounts.payer.key();  // Set authority as the payer
         pool.fee_rate = fee_rate;
         pool.reward_rate = reward_rate;
-        
-        // 2. Set initial values
         pool.total_staked = 0;
         pool.token_x_reserve = 0;
         pool.token_y_reserve = 0;
@@ -68,17 +62,31 @@ pub mod soondex {
         pool.order_count = 0;
         pool.lp_tokens = Vec::new();
     
-        // 3. Set PDA bump
-        let (_pda, bump) = Pubkey::find_program_address(&[b"pool"], ctx.program_id);
+        // 2. Set PDA bump
+        let (_pda, bump) = Pubkey::find_program_address(&[POOL_SEED], ctx.program_id);
         pool.bump = bump;
     
         // INTERACTIONS
-        // 1. Create associated token accounts if needed
-        let authority_key = ctx.accounts.payer.key();
-        let bump = Pubkey::find_program_address(&[b"pool", authority_key.as_ref()], ctx.program_id).1;
-        let seeds = &[b"pool", authority_key.as_ref(), &[bump]];
+        // 1. Protocol fee collection
+        let protocol_fee = ctx.accounts.payer.to_account_info();
+        let protocol_wallet = ctx.accounts.protocol_wallet.to_account_info();
+        
+        **protocol_fee.try_borrow_mut_lamports()? = protocol_fee
+            .lamports()
+            .checked_sub(PROTOCOL_FEE_LAMPORTS)
+            .ok_or(ErrorCode::InsufficientFunds)?;
     
-        // Create token X account if needed
+        **protocol_wallet.try_borrow_mut_lamports()? = protocol_wallet
+            .lamports()
+            .checked_add(PROTOCOL_FEE_LAMPORTS)
+            .ok_or(ErrorCode::MathOverflow)?;
+    
+        // 2. Create associated token accounts
+        let authority_key = ctx.accounts.payer.key();
+        let bump = Pubkey::find_program_address(&[POOL_SEED, authority_key.as_ref()], ctx.program_id).1;
+        let seeds = &[POOL_SEED, authority_key.as_ref(), &[bump]];
+    
+        // Create token X account
         let pool_token_x_address = associated_token::get_associated_token_address(
             &pool.key(),
             &ctx.accounts.token_x_mint.key(),
@@ -99,7 +107,7 @@ pub mod soondex {
             ))?;
         }
     
-        // Create token Y account if needed
+        // Create token Y account
         let pool_token_y_address = associated_token::get_associated_token_address(
             &pool.key(),
             &ctx.accounts.token_y_mint.key(),
@@ -129,6 +137,7 @@ pub mod soondex {
     
         Ok(())
     }
+        
     
     pub fn stake_tokens(ctx: Context<StakeTokens>, amount: u64) -> Result<()> {
         // CHECKS
@@ -235,7 +244,7 @@ pub mod soondex {
                     to: ctx.accounts.user_token_account.to_account_info(),
                     authority: pool.to_account_info(),
                 },
-                &[&[b"pool", &[pool.bump]]],
+                &[&[POOL_SEED, &[pool.bump]]],
             ),
             total_amount,
         )?;
@@ -416,7 +425,7 @@ pub mod soondex {
                     to: ctx.accounts.user_token_out.to_account_info(),
                     authority: pool.to_account_info(),
                 },
-                &[&[b"pool", &[pool.bump]]],
+                &[&[POOL_SEED, &[pool.bump]]],
             ),
             amount_out,
         )?;
@@ -577,14 +586,13 @@ for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
 
     
 #[derive(Accounts)]
-#[instruction(fee_rate: u64, reward_rate: u64)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
 pub struct InitializePool<'info> {
     #[account(
         init,
         payer = payer,
         space = 8 + std::mem::size_of::<LiquidityPool>(),
-        seeds = [POOL_SEED],
-        bump
+seeds = [POOL_SEED, token_x_mint.key().as_ref(), token_y_mint.key().as_ref()],        bump
     )]
     pub pool: Account<'info, LiquidityPool>,
 
