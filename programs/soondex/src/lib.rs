@@ -48,23 +48,23 @@ pub mod soondex {
             ErrorCode::InvalidToken
         );
         
-        let pool = &mut ctx.accounts.pool;
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
     
         // EFFECTS
         // 1. Initialize pool state
-        pool.authority = ctx.accounts.payer.key();  // Set authority as the payer
-        pool.fee_rate = fee_rate;
-        pool.reward_rate = reward_rate;
-        pool.total_staked = 0;
-        pool.token_x_reserve = 0;
-        pool.token_y_reserve = 0;
-        pool.lp_token_supply = 0;
-        pool.order_count = 0;
-        pool.lp_tokens = Vec::new();
+        liquidity_pool.authority = ctx.accounts.payer.key();  // Set authority as the payer
+        liquidity_pool.fee_rate = fee_rate;
+        liquidity_pool.reward_rate = reward_rate;
+        liquidity_pool.total_staked = 0;
+        liquidity_pool.token_x_reserve = 0;
+        liquidity_pool.token_y_reserve = 0;
+        liquidity_pool.lp_token_supply = 0;
+        liquidity_pool.order_count = 0;
+        liquidity_pool.lp_tokens = Vec::new();
     
         // 2. Set PDA bump
         let (_pda, bump) = Pubkey::find_program_address(&[POOL_SEED], ctx.program_id);
-        pool.bump = bump;
+        liquidity_pool.bump = bump;
     
         // INTERACTIONS
         // 1. Protocol fee collection
@@ -82,13 +82,28 @@ pub mod soondex {
             .ok_or(ErrorCode::MathOverflow)?;
     
         // 2. Create associated token accounts
-        let authority_key = ctx.accounts.payer.key();
-        let bump = Pubkey::find_program_address(&[POOL_SEED, authority_key.as_ref()], ctx.program_id).1;
-        let seeds = &[POOL_SEED, authority_key.as_ref(), &[bump]];
-    
+        let token_x_key = token_x_mint.key();
+        let token_y_key = token_y_mint.key();
+        
+        let bump = Pubkey::find_program_address(
+            &[
+                POOL_SEED,
+                token_x_key.as_ref(),
+                token_y_key.as_ref()
+            ],
+            ctx.program_id
+        ).1;
+        
+        let seeds = &[
+            POOL_SEED,
+            token_x_key.as_ref(),
+            token_y_key.as_ref(),
+            &[bump]
+        ];
+        
         // Create token X account
         let pool_token_x_address = associated_token::get_associated_token_address(
-            &pool.key(),
+            &liquidity_pool.key(),
             &ctx.accounts.token_x_mint.key(),
         );
     
@@ -97,7 +112,7 @@ pub mod soondex {
                 ctx.accounts.associated_token_program.to_account_info(),
                 associated_token::Create {
                     payer: ctx.accounts.payer.to_account_info(),
-                    authority: pool.to_account_info(),
+                    authority: liquidity_pool.to_account_info(),
                     associated_token: ctx.accounts.pool_token_x_account.to_account_info(),
                     mint: ctx.accounts.token_x_mint.to_account_info(),
                     system_program: ctx.accounts.system_program.to_account_info(),
@@ -109,7 +124,7 @@ pub mod soondex {
     
         // Create token Y account
         let pool_token_y_address = associated_token::get_associated_token_address(
-            &pool.key(),
+            &liquidity_pool.key(),
             &ctx.accounts.token_y_mint.key(),
         );
     
@@ -118,7 +133,7 @@ pub mod soondex {
                 ctx.accounts.associated_token_program.to_account_info(),
                 associated_token::Create {
                     payer: ctx.accounts.payer.to_account_info(),
-                    authority: pool.to_account_info(),
+                    authority: liquidity_pool.to_account_info(),
                     associated_token: ctx.accounts.pool_token_y_account.to_account_info(),
                     mint: ctx.accounts.token_y_mint.to_account_info(),
                     system_program: ctx.accounts.system_program.to_account_info(),
@@ -130,7 +145,7 @@ pub mod soondex {
     
         // EVENTS
         emit!(PoolInitialized {
-            authority: pool.authority,
+            authority: liquidity_pool.authority,
             fee_rate,
             reward_rate,
         });
@@ -157,8 +172,8 @@ pub mod soondex {
         );
         
         // 4. Validate pool capacity
-        let pool = &mut ctx.accounts.pool;
-        let new_total = pool
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        let new_total = liquidity_pool
             .total_staked
             .checked_add(amount)
             .ok_or(ErrorCode::MathOverflow)?;
@@ -173,7 +188,7 @@ pub mod soondex {
         user.last_stake_timestamp = Clock::get()?.unix_timestamp;
     
         // 2. Update pool state
-        pool.total_staked = new_total;
+        liquidity_pool.total_staked = new_total;
     
         // INTERACTIONS
         // Transfer tokens from user to pool
@@ -201,7 +216,7 @@ pub mod soondex {
     pub fn withdraw_tokens(ctx: Context<WithdrawTokens>) -> Result<()> {
         // CHECKS
         // 1. Validate stake amount
-        let pool = &mut ctx.accounts.pool;
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
         let user = &mut ctx.accounts.user_state;
         require!(user.amount_staked > 0, ErrorCode::InvalidStakeAmount);
     
@@ -211,13 +226,13 @@ pub mod soondex {
         let amount_staked = user.amount_staked;
         
         // Calculate rewards
-        let rewards = calculate_rewards(amount_staked, pool.reward_rate, stake_duration)?;
+        let rewards = calculate_rewards(amount_staked, liquidity_pool.reward_rate, stake_duration)?;
         let total_amount = amount_staked
             .checked_add(rewards)
             .ok_or(ErrorCode::MathOverflow)?;
     
         // 3. Verify pool liquidity
-        let pool = &mut ctx.accounts.pool;
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
         require!(
             ctx.accounts.pool_token_account.amount >= total_amount,
             ErrorCode::InsufficientFunds
@@ -225,7 +240,7 @@ pub mod soondex {
     
         // EFFECTS
         // 1. Update pool state
-        pool.total_staked = pool
+        liquidity_pool.total_staked = liquidity_pool
             .total_staked
             .checked_sub(amount_staked)
             .ok_or(ErrorCode::MathOverflow)?;
@@ -242,9 +257,9 @@ pub mod soondex {
                 Transfer {
                     from: ctx.accounts.pool_token_account.to_account_info(),
                     to: ctx.accounts.user_token_account.to_account_info(),
-                    authority: pool.to_account_info(),
+                    authority: liquidity_pool.to_account_info(),
                 },
-                &[&[POOL_SEED, &[pool.bump]]],
+                &[&[POOL_SEED, &[liquidity_pool.bump]]],
             ),
             total_amount,
         )?;
@@ -278,9 +293,9 @@ pub mod soondex {
     
         // EFFECTS
         // 1. Create new order
-        let pool = &mut ctx.accounts.pool;
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
         let order = Order {
-            id: pool.order_count,
+            id: liquidity_pool.order_count,
             owner: ctx.accounts.user.key(),
             side,
             amount,
@@ -289,8 +304,8 @@ pub mod soondex {
         };
     
         // 2. Update pool state
-        pool.orders.push(order);
-        pool.order_count += 1;
+        liquidity_pool.orders.push(order);
+        liquidity_pool.order_count += 1;
     
         // INTERACTIONS
         // Transfer tokens to pool
@@ -308,7 +323,7 @@ pub mod soondex {
     
         // EVENTS
         emit!(OrderPlaced {
-            order_id: pool.order_count - 1,
+            order_id: liquidity_pool.order_count - 1,
             owner: ctx.accounts.user.key(),
             side,
             amount,
@@ -329,14 +344,14 @@ pub mod soondex {
         require!(amount_in > 0, ErrorCode::InvalidSwapInput);
         require!(minimum_amount_out > 0, ErrorCode::InvalidSwapInput);
         
-        let pool = &mut ctx.accounts.pool;
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
     
         // 2. Reset 24h metrics if needed
         let current_time = Clock::get()?.unix_timestamp;
-        if current_time - pool.last_volume_reset >= SECONDS_IN_DAY {
-            pool.volume_24h = 0;
-            pool.fees_24h = 0;
-            pool.last_volume_reset = current_time;
+        if current_time - liquidity_pool.last_volume_reset >= SECONDS_IN_DAY {
+            liquidity_pool.volume_24h = 0;
+            liquidity_pool.fees_24h = 0;
+            liquidity_pool.last_volume_reset = current_time;
         }
     
         // 3. Calculate fees
@@ -363,8 +378,8 @@ pub mod soondex {
         // 4. Calculate and verify output amount
         let amount_out = calculate_swap_output(
             amount_in_after_fees,
-            pool.token_x_reserve,
-            pool.token_y_reserve,
+            liquidity_pool.token_x_reserve,
+            liquidity_pool.token_y_reserve,
         )?;
     
         require!(
@@ -374,33 +389,33 @@ pub mod soondex {
     
         // EFFECTS
         // 1. Update pool reserves
-        pool.token_x_reserve = pool
+        liquidity_pool.token_x_reserve = liquidity_pool
             .token_x_reserve
             .checked_add(amount_in)
             .ok_or(ErrorCode::MathOverflow)?;
-        pool.token_y_reserve = pool
+        liquidity_pool.token_y_reserve = liquidity_pool
             .token_y_reserve
             .checked_sub(amount_out)
             .ok_or(ErrorCode::MathOverflow)?;
     
         // 2. Update staking rewards
-        pool.staking_rewards = pool
+        liquidity_pool.staking_rewards = liquidity_pool
             .staking_rewards
             .checked_add(staker_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
     
         // 3. Update metrics
-        pool.volume_24h = pool
+        liquidity_pool.volume_24h = liquidity_pool
             .volume_24h
             .checked_add(amount_in)
             .ok_or(ErrorCode::MathOverflow)?;
-        pool.fees_24h = pool
+        liquidity_pool.fees_24h = liquidity_pool
             .fees_24h
             .checked_add(total_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
     
-        pool.tvl_x = pool.token_x_reserve;
-        pool.tvl_y = pool.token_y_reserve;
+        liquidity_pool.tvl_x = liquidity_pool.token_x_reserve;
+        liquidity_pool.tvl_y = liquidity_pool.token_y_reserve;
     
         // INTERACTIONS
         // 1. Transfer tokens from user to pool
@@ -423,12 +438,18 @@ pub mod soondex {
                 Transfer {
                     from: ctx.accounts.pool_token_out.to_account_info(),
                     to: ctx.accounts.user_token_out.to_account_info(),
-                    authority: pool.to_account_info(),
+                    authority: liquidity_pool.to_account_info(),
                 },
-                &[&[POOL_SEED, &[pool.bump]]],
+                &[&[
+                    POOL_SEED,
+                    ctx.accounts.token_x_mint.key().as_ref(),
+                    ctx.accounts.token_y_mint.key().as_ref(),
+                    &[liquidity_pool.bump]
+                ]],
             ),
             amount_out,
         )?;
+        
     
         // EVENTS
         emit!(TokensSwapped {
@@ -441,17 +462,17 @@ pub mod soondex {
     }
     pub fn match_orders(ctx: Context<MatchOrders>) -> Result<()> {
         // CHECKS
-        let pool = &mut ctx.accounts.pool;
-        require!(!pool.orders.is_empty(), ErrorCode::InvalidOrderAmount);
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        require!(!liquidity_pool.orders.is_empty(), ErrorCode::InvalidOrderAmount);
     
         // PREPARATION
         // 1. Filter and sort buy/sell orders
-        let mut buy_orders: Vec<_> = pool
+        let mut buy_orders: Vec<_> = liquidity_pool
             .orders
             .iter()
             .filter(|o| o.side == OrderSide::Buy && o.amount > o.fulfilled)
             .collect();
-        let mut sell_orders: Vec<_> = pool
+        let mut sell_orders: Vec<_> = liquidity_pool
             .orders
             .iter()
             .filter(|o| o.side == OrderSide::Sell && o.amount > o.fulfilled)
@@ -461,7 +482,7 @@ pub mod soondex {
         sell_orders.sort_by(|a, b| a.price.cmp(&b.price)); // Lowest sell first
     
         // 2. Initialize matching variables
-        let fee_rate = pool.fee_rate;
+        let fee_rate = liquidity_pool.fee_rate;
         let mut matches = Vec::new();
         let mut total_matched_volume = 0u64;
     
@@ -527,7 +548,7 @@ pub mod soondex {
 
 for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
     // Update buy order
-    if let Some(buy_order) = pool.orders.iter_mut().find(|o| o.id == *buy_id) {
+    if let Some(buy_order) = liquidity_pool.orders.iter_mut().find(|o| o.id == *buy_id) {
         buy_order.fulfilled = buy_order
             .fulfilled
             .checked_add(*match_amount)
@@ -535,7 +556,7 @@ for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
     }
 
     // Update sell order
-    if let Some(sell_order) = pool.orders.iter_mut().find(|o| o.id == *sell_id) {
+    if let Some(sell_order) = liquidity_pool.orders.iter_mut().find(|o| o.id == *sell_id) {
         sell_order.fulfilled = sell_order
             .fulfilled
             .checked_add(*match_amount)
@@ -560,17 +581,17 @@ for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
 
     
         // 2. Update pool state
-        pool.token_x_reserve = pool
+        liquidity_pool.token_x_reserve = liquidity_pool
             .token_x_reserve
             .checked_add(total_fees)
             .ok_or(ErrorCode::MathOverflow)?;
-        pool.volume_24h = pool
+        liquidity_pool.volume_24h = liquidity_pool
             .volume_24h
             .checked_add(total_volume)
             .ok_or(ErrorCode::MathOverflow)?;
     
         // 3. Clean up matched orders
-        pool.orders.retain(|order| order.amount > order.fulfilled);
+        liquidity_pool.orders.retain(|order| order.amount > order.fulfilled);
     
         // EVENTS
         if total_matched_volume > 0 {
@@ -582,6 +603,54 @@ for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
     
         Ok(())
     }
+    pub fn cancel_order(ctx: Context<CancelOrder>, order_id: u64) -> Result<()> {
+        // CHECKS
+        // 1. Find and validate order
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        let order = liquidity_pool.orders
+            .iter()
+            .find(|o| o.id == order_id && o.owner == ctx.accounts.user.key())
+            .ok_or(ErrorCode::OrderNotFound)?;
+    
+        // 2. Calculate refund amount
+        let refund_amount = order.amount
+            .checked_sub(order.fulfilled)
+            .ok_or(ErrorCode::MathOverflow)?;
+    
+        // EFFECTS
+        // 1. Remove order from pool
+        liquidity_pool.orders.retain(|o| o.id != order_id);
+    
+        // INTERACTIONS
+        // 1. Return unfulfilled tokens to user
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.pool_token_account.to_account_info(),
+                    to: ctx.accounts.user_token_account.to_account_info(),
+                    authority: liquidity_pool.to_account_info(),
+                },
+                &[&[
+                    POOL_SEED,
+                    ctx.accounts.token_x_mint.key().as_ref(),
+                    ctx.accounts.token_y_mint.key().as_ref(),
+                    &[liquidity_pool.bump]
+                ]],
+            ),
+            refund_amount,
+        )?;
+    
+        // EVENTS
+        emit!(OrderCancelled {
+            order_id,
+            owner: ctx.accounts.user.key(),
+            refund_amount,
+        });
+    
+        Ok(())
+    }
+    
 }    
 
     
@@ -599,7 +668,7 @@ pub struct InitializePool<'info> {
         ],
         bump
     )]
-    pub pool: Account<'info, LiquidityPool>,
+    pub liquidity_pool: Account<'info, LiquidityPool>,
 
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -621,9 +690,17 @@ pub struct InitializePool<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
 pub struct ProvideLiquidity<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
@@ -638,9 +715,17 @@ pub struct ProvideLiquidity<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
 pub struct StakeTokens<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
@@ -653,9 +738,18 @@ pub struct StakeTokens<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
+
 pub struct WithdrawTokens<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
@@ -668,9 +762,18 @@ pub struct WithdrawTokens<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
+
 pub struct PlaceOrder<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
@@ -681,17 +784,35 @@ pub struct PlaceOrder<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
+
 pub struct MatchOrders<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
+
 pub struct SwapTokens<'info> {
-    #[account(mut)]
-    pub pool: Account<'info, LiquidityPool>,
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
@@ -703,7 +824,32 @@ pub struct SwapTokens<'info> {
     #[account(mut)]
     pub pool_token_out: Box<Account<'info, token::TokenAccount>>,
     pub token_program: Program<'info, Token>,
+    pub token_x_mint: Box<Account<'info, token::Mint>>,
+    pub token_y_mint: Box<Account<'info, token::Mint>>,
 }
+#[derive(Accounts)]
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey)]
+pub struct CancelOrder<'info> {
+    #[account(mut,
+        seeds = [
+            POOL_SEED,
+            token_x_mint.key().as_ref(),
+            token_y_mint.key().as_ref()
+        ],
+        bump,
+    )]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut)]
+    pub user_token_account: Box<Account<'info, token::TokenAccount>>,
+    #[account(mut)]
+    pub pool_token_account: Box<Account<'info, token::TokenAccount>>,
+    pub token_program: Program<'info, Token>,
+    pub token_x_mint: Box<Account<'info, token::Mint>>,
+    pub token_y_mint: Box<Account<'info, token::Mint>>,
+}
+
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct LpTokenBalance {
@@ -861,6 +1007,13 @@ pub struct OrdersMatched {
 pub struct OrderMatchingComplete {
     pub total_matches: u64,
     pub total_volume: u64,
+}
+
+#[event]
+pub struct OrderCancelled {
+    pub order_id: u64,
+    pub owner: Pubkey,
+    pub refund_amount: u64,
 }
 
 #[error_code]
