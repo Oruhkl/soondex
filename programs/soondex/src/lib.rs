@@ -28,6 +28,49 @@ declare_id!("B4xt3vAan4S5UmUgucsxMPi2uwqEmrSSdvJnzVPWeUFu");
 #[program]
 pub mod soondex {
     use super::*;
+
+
+    pub fn manage_admin(
+        ctx: Context<ManageAdmin>,
+        admin_address: Pubkey,
+        is_add: bool,
+    ) -> Result<()> {
+        // CHECKS
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        
+        // Verify super admin authority
+        require!(
+            ctx.accounts.authority.key() == liquidity_pool.super_admin,
+            ErrorCode::Unauthorized
+        );
+        
+        // Verify admin isn't already in list when adding
+        if is_add {
+            require!(
+                !liquidity_pool.admins.contains(&admin_address),
+                ErrorCode::AdminAlreadyExists
+            );
+        }
+    
+        // EFFECTS
+        // Modify admin list
+        if is_add {
+            liquidity_pool.admins.push(admin_address);
+        } else {
+            liquidity_pool.admins.retain(|&x| x != admin_address);
+        }
+    
+        // INTERACTIONS
+        // Emit event for external notification
+        emit!(AdminUpdated {
+            admin: admin_address,
+            is_added: is_add,
+            super_admin: ctx.accounts.authority.key(),
+        });
+    
+        Ok(())
+    }
+
     pub fn initialize_pool(
         ctx: Context<InitializePool>,
         token_x_mint: Pubkey,
@@ -36,7 +79,7 @@ pub mod soondex {
         reward_rate: u64,
     ) -> Result<()> {
         // CHECKS
-        // 1. Validate input rates and tokens
+        //Validate input rates and tokens
         require!(fee_rate <= MAX_FEE_RATE, ErrorCode::InvalidFeeRate);
         require!(reward_rate <= MAX_REWARD_RATE, ErrorCode::InvalidRewardRate);
         require!(
@@ -44,12 +87,13 @@ pub mod soondex {
             ErrorCode::InvalidToken
         );
         require!(
-            ctx.accounts.token_y_mint.key() == token_y_mint,
-            ErrorCode::InvalidToken
+            ctx.accounts.payer.lamports() >= PROTOCOL_FEE_LAMPORTS,
+            ErrorCode::InsufficientFunds
         );
         
         let liquidity_pool = &mut ctx.accounts.liquidity_pool;
-    
+        liquidity_pool.bump = ctx.bumps.liquidity_pool;
+
         // EFFECTS
         // 1. Initialize pool state
         liquidity_pool.authority = ctx.accounts.payer.key();  // Set authority as the payer
@@ -61,25 +105,27 @@ pub mod soondex {
         liquidity_pool.lp_token_supply = 0;
         liquidity_pool.order_count = 0;
         liquidity_pool.lp_tokens = Vec::new();
+        liquidity_pool.super_admin = ctx.accounts.payer.key();  // Set the payer as super admin
+
     
         // 2. Set PDA bump
-        let (_pda, bump) = Pubkey::find_program_address(&[POOL_SEED], ctx.program_id);
-        liquidity_pool.bump = bump;
+        let (_pda, _bump) = Pubkey::find_program_address(
+            &[POOL_SEED, ctx.accounts.token_x_mint.key().as_ref(), ctx.accounts.token_y_mint.key().as_ref()],
+            ctx.program_id,
+        );
     
         // INTERACTIONS
         // 1. Protocol fee collection
-        let protocol_fee = ctx.accounts.payer.to_account_info();
-        let protocol_wallet = ctx.accounts.protocol_wallet.to_account_info();
-        
-        **protocol_fee.try_borrow_mut_lamports()? = protocol_fee
-            .lamports()
-            .checked_sub(PROTOCOL_FEE_LAMPORTS)
-            .ok_or(ErrorCode::InsufficientFunds)?;
-    
-        **protocol_wallet.try_borrow_mut_lamports()? = protocol_wallet
-            .lamports()
-            .checked_add(PROTOCOL_FEE_LAMPORTS)
-            .ok_or(ErrorCode::MathOverflow)?;
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.payer.to_account_info(),
+                    to: ctx.accounts.protocol_wallet.to_account_info(),
+                },
+            ),
+            PROTOCOL_FEE_LAMPORTS,
+        )?;
     
         // 2. Create associated token accounts
         let token_x_key = token_x_mint.key();
@@ -152,6 +198,74 @@ pub mod soondex {
     
         Ok(())
     }
+
+    pub fn add_liquidity(
+        ctx: Context<ProvideLiquidity>, 
+        amount_x: u64,
+        amount_y: u64,
+        min_lp_tokens: u64
+    ) -> Result<()> {
+        // CHECKS
+        require!(amount_x > 0 && amount_y > 0, ErrorCode::InvalidLiquidityAmount);
+        
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        
+        // Calculate LP tokens to mint
+        let lp_tokens = liquidity_pool.calculate_lp_tokens(amount_x, amount_y)?;
+        require!(lp_tokens >= min_lp_tokens, ErrorCode::ExcessiveSlippage);
+    
+        // EFFECTS
+        // Update pool reserves
+        liquidity_pool.token_x_reserve = liquidity_pool.token_x_reserve.checked_add(amount_x)
+            .ok_or(ErrorCode::MathOverflow)?;
+        liquidity_pool.token_y_reserve = liquidity_pool.token_y_reserve.checked_add(amount_y)
+            .ok_or(ErrorCode::MathOverflow)?;
+        liquidity_pool.lp_token_supply = liquidity_pool.lp_token_supply.checked_add(lp_tokens)
+            .ok_or(ErrorCode::MathOverflow)?;
+    
+        // Add LP token balance for user
+        liquidity_pool.lp_tokens.push(LpTokenBalance {
+            owner: ctx.accounts.user.key(),
+            amount: lp_tokens,
+        });
+    
+        // INTERACTIONS
+        // Transfer tokens from user to pool
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_token_x_account.to_account_info(),
+                    to: ctx.accounts.pool_token_x_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            amount_x,
+        )?;
+    
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_token_y_account.to_account_info(),
+                    to: ctx.accounts.pool_token_y_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            amount_y,
+        )?;
+    
+        // EVENTS
+        emit!(LiquidityProvided {
+            user: ctx.accounts.user.key(),
+            token_x_amount: amount_x,
+            token_y_amount: amount_y,
+            lp_tokens_minted: lp_tokens,
+        });
+    
+        Ok(())
+    }
+    
         
     
     pub fn stake_tokens(ctx: Context<StakeTokens>, amount: u64) -> Result<()> {
@@ -256,13 +370,19 @@ pub mod soondex {
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.pool_token_account.to_account_info(),
-                    to: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.user_token_account.to_account_info(), 
                     authority: liquidity_pool.to_account_info(),
                 },
-                &[&[POOL_SEED, &[liquidity_pool.bump]]],
+                &[&[
+                    POOL_SEED,
+                    ctx.accounts.token_x_mint.key().as_ref(),
+                    ctx.accounts.token_y_mint.key().as_ref(),
+                    &[liquidity_pool.bump]
+                ]],
             ),
             total_amount,
         )?;
+        
     
         // EVENTS
         emit!(TokensWithdrawn {
@@ -332,29 +452,36 @@ pub mod soondex {
     
         Ok(())
     }
-
-
     pub fn swap_tokens(
         ctx: Context<SwapTokens>,
+        input_token: Pubkey,
+        output_token: Pubkey,
         amount_in: u64,
         minimum_amount_out: u64,
     ) -> Result<()> {
         // CHECKS
-        // 1. Validate input parameters
+        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
+        
+        // 1. Validate basic parameters
         require!(amount_in > 0, ErrorCode::InvalidSwapInput);
         require!(minimum_amount_out > 0, ErrorCode::InvalidSwapInput);
-        
-        let liquidity_pool = &mut ctx.accounts.liquidity_pool;
     
-        // 2. Reset 24h metrics if needed
-        let current_time = Clock::get()?.unix_timestamp;
-        if current_time - liquidity_pool.last_volume_reset >= SECONDS_IN_DAY {
-            liquidity_pool.volume_24h = 0;
-            liquidity_pool.fees_24h = 0;
-            liquidity_pool.last_volume_reset = current_time;
-        }
+        // 2. Validate token direction
+        let is_input_token_x = input_token == ctx.accounts.token_x_mint.key();
+        let is_output_token_y = output_token == ctx.accounts.token_y_mint.key();
+        require!(
+            is_input_token_x && is_output_token_y || !is_input_token_x && !is_output_token_y,
+            ErrorCode::InvalidTokenPair
+        );
     
-        // 3. Calculate fees
+        // 3. Get current reserves
+        let (input_reserve, output_reserve) = if is_input_token_x {
+            (liquidity_pool.token_x_reserve, liquidity_pool.token_y_reserve)
+        } else {
+            (liquidity_pool.token_y_reserve, liquidity_pool.token_x_reserve)
+        };
+    
+        // 4. Calculate fees and output
         let total_fee_amount = (amount_in as u128)
             .checked_mul(TOTAL_FEE_RATE as u128)
             .ok_or(ErrorCode::MathOverflow)?
@@ -375,36 +502,48 @@ pub mod soondex {
             .checked_sub(total_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
     
-        // 4. Calculate and verify output amount
-        let amount_out = calculate_swap_output(
+        let output_amount = calculate_swap_output(
             amount_in_after_fees,
-            liquidity_pool.token_x_reserve,
-            liquidity_pool.token_y_reserve,
+            input_reserve,
+            output_reserve,
         )?;
     
         require!(
-            amount_out >= minimum_amount_out,
+            output_amount >= minimum_amount_out,
             ErrorCode::ExcessiveSlippage
         );
     
         // EFFECTS
-        // 1. Update pool reserves
-        liquidity_pool.token_x_reserve = liquidity_pool
-            .token_x_reserve
-            .checked_add(amount_in)
-            .ok_or(ErrorCode::MathOverflow)?;
-        liquidity_pool.token_y_reserve = liquidity_pool
-            .token_y_reserve
-            .checked_sub(amount_out)
-            .ok_or(ErrorCode::MathOverflow)?;
+        // 1. Update metrics if needed
+        let current_time = Clock::get()?.unix_timestamp;
+        if current_time - liquidity_pool.last_volume_reset >= SECONDS_IN_DAY {
+            liquidity_pool.volume_24h = 0;
+            liquidity_pool.fees_24h = 0;
+            liquidity_pool.last_volume_reset = current_time;
+        }
     
-        // 2. Update staking rewards
+        // 2. Update reserves
+        if is_input_token_x {
+            liquidity_pool.token_x_reserve = input_reserve
+                .checked_add(amount_in)
+                .ok_or(ErrorCode::MathOverflow)?;
+            liquidity_pool.token_y_reserve = output_reserve
+                .checked_sub(output_amount)
+                .ok_or(ErrorCode::MathOverflow)?;
+        } else {
+            liquidity_pool.token_y_reserve = input_reserve
+                .checked_add(amount_in)
+                .ok_or(ErrorCode::MathOverflow)?;
+            liquidity_pool.token_x_reserve = output_reserve
+                .checked_sub(output_amount)
+                .ok_or(ErrorCode::MathOverflow)?;
+        }
+    
+        // 3. Update pool metrics
         liquidity_pool.staking_rewards = liquidity_pool
             .staking_rewards
             .checked_add(staker_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
-    
-        // 3. Update metrics
         liquidity_pool.volume_24h = liquidity_pool
             .volume_24h
             .checked_add(amount_in)
@@ -413,30 +552,41 @@ pub mod soondex {
             .fees_24h
             .checked_add(total_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
-    
         liquidity_pool.tvl_x = liquidity_pool.token_x_reserve;
         liquidity_pool.tvl_y = liquidity_pool.token_y_reserve;
     
         // INTERACTIONS
-        // 1. Transfer tokens from user to pool
+        // 1. Transfer input tokens
+        let pool_token_in = if is_input_token_x {
+            ctx.accounts.pool_token_x.to_account_info()
+        } else {
+            ctx.accounts.pool_token_y.to_account_info()
+        };
+        
         token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
                     from: ctx.accounts.user_token_in.to_account_info(),
-                    to: ctx.accounts.pool_token_in.to_account_info(),
+                    to: pool_token_in,
                     authority: ctx.accounts.user.to_account_info(),
                 },
             ),
             amount_in,
         )?;
     
-        // 2. Transfer tokens from pool to user
+        // 2. Transfer output tokens
+        let pool_token_out = if is_input_token_x {
+            ctx.accounts.pool_token_y.to_account_info()
+        } else {
+            ctx.accounts.pool_token_x.to_account_info()
+        };
+    
         token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.pool_token_out.to_account_info(),
+                    from: pool_token_out,
                     to: ctx.accounts.user_token_out.to_account_info(),
                     authority: liquidity_pool.to_account_info(),
                 },
@@ -444,22 +594,22 @@ pub mod soondex {
                     POOL_SEED,
                     ctx.accounts.token_x_mint.key().as_ref(),
                     ctx.accounts.token_y_mint.key().as_ref(),
-                    &[liquidity_pool.bump]
+                    &[liquidity_pool.bump],
                 ]],
             ),
-            amount_out,
+            output_amount,
         )?;
-        
     
-        // EVENTS
+        // Event
         emit!(TokensSwapped {
-            input_token: "X".to_string(),
+            input_token: input_token.to_string(),
             input_amount: amount_in,
-            output_amount: amount_out,
+            output_amount,
         });
     
         Ok(())
     }
+    
     pub fn match_orders(ctx: Context<MatchOrders>) -> Result<()> {
         // CHECKS
         let liquidity_pool = &mut ctx.accounts.liquidity_pool;
@@ -653,7 +803,14 @@ for (buy_id, sell_id, match_amount, match_price, fee_amount) in &matches {
     
 }    
 
-    
+#[derive(Accounts)]
+pub struct ManageAdmin<'info> {
+    #[account(mut)]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
+    pub authority: Signer<'info>,
+}
+
+
 #[derive(Accounts)]
 #[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
 pub struct InitializePool<'info> {
@@ -715,6 +872,24 @@ pub struct ProvideLiquidity<'info> {
 }
 
 #[derive(Accounts)]
+pub struct RemoveLiquidity<'info> {
+    #[account(mut)]
+    pub liquidity_pool: Account<'info, LiquidityPool>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut)]
+    pub user_token_x_account: Account<'info, token::TokenAccount>,
+    #[account(mut)] 
+    pub user_token_y_account: Account<'info, token::TokenAccount>,
+    #[account(mut)]
+    pub pool_token_x_account: Account<'info, token::TokenAccount>,
+    #[account(mut)]
+    pub pool_token_y_account: Account<'info, token::TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+
+#[derive(Accounts)]
 #[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
 pub struct StakeTokens<'info> {
     #[account(mut,
@@ -726,20 +901,32 @@ pub struct StakeTokens<'info> {
         bump,
     )]
     pub liquidity_pool: Account<'info, LiquidityPool>,
+    
+    #[account(
+        init_if_needed,
+        payer = user,
+        space = 8 + std::mem::size_of::<UserState>(),
+        seeds = [
+            b"user_state",
+            liquidity_pool.key().as_ref(),
+            user.key().as_ref()
+        ],
+        bump
+    )]
+    pub user_state: Account<'info, UserState>,
+    
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(mut)]
-    pub user_state: Account<'info, UserState>,
+    pub user_token_account: Account<'info, token::TokenAccount>,
     #[account(mut)]
-    pub user_token_account: Box<Account<'info, token::TokenAccount>>,
-    #[account(mut)]
-    pub pool_token_account: Box<Account<'info, token::TokenAccount>>,
+    pub pool_token_account: Account<'info, token::TokenAccount>,
+    
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
-
 #[derive(Accounts)]
-#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
-
+#[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey)]
 pub struct WithdrawTokens<'info> {
     #[account(mut,
         seeds = [
@@ -747,19 +934,35 @@ pub struct WithdrawTokens<'info> {
             token_x_mint.key().as_ref(),
             token_y_mint.key().as_ref()
         ],
-        bump,
+        bump = liquidity_pool.bump,
     )]
     pub liquidity_pool: Account<'info, LiquidityPool>,
+    
     #[account(mut)]
     pub user: Signer<'info>,
-    #[account(mut)]
+    
+    #[account(
+        mut,
+        seeds = [
+            b"user_state",
+            liquidity_pool.key().as_ref(),
+            user.key().as_ref()
+        ],
+        bump
+    )]
     pub user_state: Account<'info, UserState>,
+    
     #[account(mut)]
     pub user_token_account: Box<Account<'info, token::TokenAccount>>,
     #[account(mut)]
     pub pool_token_account: Box<Account<'info, token::TokenAccount>>,
+    
     pub token_program: Program<'info, Token>,
+    pub token_x_mint: Box<Account<'info, token::Mint>>,
+    pub token_y_mint: Box<Account<'info, token::Mint>>,
+    pub system_program: Program<'info, System>,
 }
+
 
 #[derive(Accounts)]
 #[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey, fee_rate: u64, reward_rate: u64)]
@@ -822,10 +1025,12 @@ pub struct SwapTokens<'info> {
     #[account(mut)]
     pub pool_token_in: Box<Account<'info, token::TokenAccount>>,
     #[account(mut)]
-    pub pool_token_out: Box<Account<'info, token::TokenAccount>>,
+    pub pool_token_x: Account<'info, token::TokenAccount>,
+    #[account(mut)]
+    pub pool_token_y: Account<'info, token::TokenAccount>,
     pub token_program: Program<'info, Token>,
-    pub token_x_mint: Box<Account<'info, token::Mint>>,
-    pub token_y_mint: Box<Account<'info, token::Mint>>,
+    pub token_x_mint: Account<'info, token::Mint>,
+    pub token_y_mint: Account<'info, token::Mint>,
 }
 #[derive(Accounts)]
 #[instruction(token_x_mint: Pubkey, token_y_mint: Pubkey)]
@@ -926,9 +1131,13 @@ pub struct Order {
 #[account]
 pub struct LiquidityPool {
     pub authority: Pubkey,
+    pub admins: Vec<Pubkey>,
+    pub super_admin: Pubkey, 
     pub token_x_reserve: u64,
     pub token_y_reserve: u64,
     pub lp_token_supply: u64,
+    pub token_x_mint: Pubkey,
+    pub token_y_mint: Pubkey,
     pub lp_tokens: Vec<LpTokenBalance>,
     pub fee_rate: u64,
     pub reward_rate: u64,
@@ -945,12 +1154,23 @@ pub struct LiquidityPool {
 }
 
 
-#[account]
-pub struct UserState {
-    pub amount_staked: u64,
-    pub last_stake_timestamp: i64,
+#[event]
+pub struct AdminUpdated {
+    pub admin: Pubkey,
+    pub is_added: bool,
+    pub super_admin: Pubkey,
 }
 
+#[account]
+pub struct UserState {
+    pub pool: Pubkey,
+    pub owner: Pubkey,
+    pub amount_staked: u64,
+    pub last_stake_timestamp: i64,
+    pub rewards_earned: u64,
+    pub last_reward_timestamp: i64,
+    pub bump: u8,
+}
 #[event]
 pub struct PoolInitialized {
     pub authority: Pubkey,
@@ -965,6 +1185,21 @@ pub struct LiquidityProvided {
     pub token_y_amount: u64,
     pub lp_tokens_minted: u64,
 }
+
+#[event]
+pub struct LiquidityRemoved {
+    pub user: Pubkey,
+    pub token_x_amount: u64,
+    pub token_y_amount: u64,
+    pub lp_tokens_burned: u64,
+}
+
+#[event]
+pub struct RewardsHarvested {
+    pub user: Pubkey,
+    pub amount: u64,
+}
+
 
 #[event]
 pub struct TokensStaked {
@@ -1020,6 +1255,9 @@ pub struct OrderCancelled {
 pub enum ErrorCode {
     #[msg("Invalid token input")]
     InvalidToken,
+
+    #[msg("Invalid Token Pair")]
+    InvalidTokenPair,
 
     #[msg("Mathematical operation overflow")]
     MathOverflow,
@@ -1083,6 +1321,20 @@ pub enum ErrorCode {
 
     #[msg("Unauthorized operation")]
     Unauthorized,
+    #[msg("Invalid Liquidity PoolPDA")]
+    InvalidLiquidityPoolPDA,
+
+    #[msg("No liquidity provided")]
+    NoLiquidity,
+    
+    #[msg("Invalid LP token amount")]
+    InvalidLPTokenAmount,
+    
+    #[msg("LP tokens locked")]
+    LPTokensLocked,
+    #[msg("Admin already exists")]
+    AdminAlreadyExists,
+    
 }
 impl LiquidityPool {
     pub fn calculate_lp_tokens(&self, token_x_amount: u64, token_y_amount: u64) -> Result<u64> {

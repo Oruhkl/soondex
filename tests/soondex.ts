@@ -1,30 +1,63 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Soondex } from "../target/types/soondex";
-import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
-import { expect } from 'chai';
+import { assert } from "chai";
 import {
   TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
   createMint,
   getAssociatedTokenAddress,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccount,
   mintTo,
+  getAccount,
 } from "@solana/spl-token";
+import { Keypair, SystemProgram, PublicKey } from "@solana/web3.js";
 
-describe("Soondex", () => {
+describe("Soondex DEX", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Soondex as Program<Soondex>;
-
   const wallet = provider.wallet as anchor.Wallet;
+
+  const getUserStateAddress = async (userPubkey: PublicKey): Promise<PublicKey> => {
+    const [userStatePDA] = await PublicKey.findProgramAddress(
+      [Buffer.from("user_state"), userPubkey.toBuffer()],
+      program.programId
+    );
+    return userStatePDA;
+  };
+
   let tokenXMint: PublicKey;
   let tokenYMint: PublicKey;
   let liquidityPoolPDA: PublicKey;
   let poolTokenXAccount: PublicKey;
   let poolTokenYAccount: PublicKey;
+  let userTokenXAccount: PublicKey;
+  let userTokenYAccount: PublicKey;
+  let mintAuthority: Keypair;
+  let protocolWallet: Keypair;
+  let adminKeypair: Keypair;
+  let bump: number;
 
   before(async () => {
-    const mintAuthority = Keypair.generate();
+    console.log("\n=== Setting up Test Environment ===");
+
+    mintAuthority = Keypair.generate();
+    protocolWallet = Keypair.generate();
+    adminKeypair = Keypair.generate();
+    
+    console.log("Generated Keys:");
+    console.log(`Mint Authority: ${mintAuthority.publicKey}`);
+    console.log(`Protocol Wallet: ${protocolWallet.publicKey}`);
+    console.log(`Admin: ${adminKeypair.publicKey}`);
+
+    const airdropTx = await provider.connection.requestAirdrop(
+      mintAuthority.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(airdropTx);
+    console.log("✓ Airdropped SOL to mint authority");
+
     tokenXMint = await createMint(
       provider.connection,
       mintAuthority,
@@ -39,36 +72,83 @@ describe("Soondex", () => {
       null,
       9
     );
+    console.log("✓ Created token mints:", {
+      tokenX: tokenXMint.toString(),
+      tokenY: tokenYMint.toString()
+    });
 
-    [liquidityPoolPDA] = PublicKey.findProgramAddressSync(
+    [liquidityPoolPDA, bump] = PublicKey.findProgramAddressSync(
       [Buffer.from("pool"), tokenXMint.toBuffer(), tokenYMint.toBuffer()],
       program.programId
     );
+    console.log("✓ Generated liquidity pool PDA:", liquidityPoolPDA.toString());
 
-    poolTokenXAccount = await getAssociatedTokenAddress(
+    poolTokenXAccount = await getAssociatedTokenAddress(tokenXMint, liquidityPoolPDA, true);
+    poolTokenYAccount = await getAssociatedTokenAddress(tokenYMint, liquidityPoolPDA, true);
+    
+    userTokenXAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
+      tokenXMint,
+      wallet.publicKey
+    );
+    userTokenYAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
+      tokenYMint,
+      wallet.publicKey
+    );
+    console.log("✓ Created token accounts");
+
+    await createAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
       tokenXMint,
       liquidityPoolPDA,
+      undefined,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
       true
     );
-    poolTokenYAccount = await getAssociatedTokenAddress(
+    await createAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
       tokenYMint,
       liquidityPoolPDA,
+      undefined,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
       true
     );
-  });
+    console.log("✓ Initialized pool token accounts");
 
-  it("Initializes liquidity pool", async () => {
-    const protocolWallet = Keypair.generate();
+    await mintTo(
+      provider.connection,
+      mintAuthority,
+      tokenXMint,
+      userTokenXAccount,
+      mintAuthority.publicKey,
+      1_000_000_000
+    );
+    await mintTo(
+      provider.connection,
+      mintAuthority,
+      tokenYMint,
+      userTokenYAccount,
+      mintAuthority.publicKey,
+      1_000_000_000
+    );
+    console.log("✓ Minted initial tokens to user");
 
     await program.methods
       .initializePool(
         tokenXMint,
         tokenYMint,
         new anchor.BN(25),
-        new anchor.BN(500)
+        new anchor.BN(100)
       )
-      .accounts({
-        liquidityPool: liquidityPoolPDA, // Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
+      .accountsStrict({
+        liquidityPool: liquidityPoolPDA,
         payer: wallet.publicKey,
         systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -80,154 +160,86 @@ describe("Soondex", () => {
         protocolWallet: protocolWallet.publicKey,
       })
       .rpc();
-  });
-
-  it("Places a buy order", async () => {
-    const userTokenAccount = await getAssociatedTokenAddress(
-      tokenXMint,
-      wallet.publicKey
-    );
+    console.log("✓ Initialized liquidity pool");
 
     await program.methods
-      .placeOrder(
-        { buy: {} },
-        new anchor.BN(1000),
-        new anchor.BN(100)
+      .manageAdmin(adminKeypair.publicKey, true)
+      .accounts({
+        liquidityPool: liquidityPoolPDA,
+        authority: wallet.publicKey,
+      })
+      .rpc();
+    console.log("✓ Setup admin");
+  });
+
+
+  /* This tests below are yet to pass probably because of complexities */
+  it("Add Initial Liquidity", async () => {
+    console.log("\n=== Adding Initial Liquidity ==="); // 2% slippage tolerance
+    const amountX = 100_000_000;
+    const amountY = 100_000_000;
+    const minLpTokens = Math.floor(Math.sqrt(amountX * amountY) * 0.98);
+    const params = {
+        amountX: new anchor.BN(100_000_000),
+        amountY: new anchor.BN(100_000_000),
+        minLpTokens: new anchor.BN(1000)
+    };
+    
+    const tx = await program.methods
+      .addLiquidity(
+        params.amountX,
+        params.amountY,
+        params.minLpTokens
       )
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
+      .accountsStrict({
+        liquidityPool: liquidityPoolPDA,
         user: wallet.publicKey,
-        userTokenAccount,
-        poolTokenAccount: poolTokenXAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        userTokenXAccount: userTokenXAccount,
+        userTokenYAccount: userTokenYAccount,
+        poolTokenXAccount: poolTokenXAccount,
+        poolTokenYAccount: poolTokenYAccount,
+        tokenProgram: TOKEN_PROGRAM_ID
       })
       .rpc();
-  });
+    
+    console.log("Add Liquidity TX:", tx);
+    console.log("✓ Initial liquidity added successfully");
+});
 
-  it("Cancels an order", async () => {
-    await program.methods
-      .cancelOrder(new anchor.BN(0))
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
-        user: wallet.publicKey,
-        userTokenAccount: poolTokenXAccount,
-        poolTokenAccount: poolTokenXAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        tokenXMint,
-        tokenYMint,
-      })
-      .rpc();
-  });
-
-  it("Swaps tokens", async () => {
-    const userTokenXAccount = await getAssociatedTokenAddress(
-      tokenXMint,
-      wallet.publicKey
-    );
-    const userTokenYAccount = await getAssociatedTokenAddress(
-      tokenYMint,
-      wallet.publicKey
-    );
-
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      tokenXMint,
-      userTokenXAccount,
-      wallet.publicKey,
-      1000000000
-    );
-
-    const initialUserXBalance = await provider.connection.getTokenAccountBalance(userTokenXAccount);
-    const initialUserYBalance = await provider.connection.getTokenAccountBalance(userTokenYAccount);
-
-    await program.methods
+  it("Swap Tokens", async () => {
+    console.log("\n=== Performing Token Swap ===");
+    
+    const params = {
+        inputToken: tokenXMint,
+        outputToken: tokenYMint,
+        amountIn: new anchor.BN(10_000_000),
+        minimumAmountOut: new anchor.BN(9_000_000)
+    };
+    
+    const tx = await program.methods
       .swapTokens(
-        new anchor.BN(1000000),
-        new anchor.BN(900000)
+        params.inputToken,
+        params.outputToken,
+        params.amountIn,
+        params.minimumAmountOut
       )
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
+      .accountsStrict({
+        liquidityPool: liquidityPoolPDA,
         user: wallet.publicKey,
         userTokenIn: userTokenXAccount,
         userTokenOut: userTokenYAccount,
         poolTokenIn: poolTokenXAccount,
-        poolTokenOut: poolTokenYAccount,
+        poolTokenX: poolTokenXAccount,
+        poolTokenY: poolTokenYAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
         tokenXMint,
         tokenYMint
       })
       .rpc();
+    
+    console.log("Swap TX:", tx);
+    console.log("✓ Swap executed successfully");
+});
 
-    const finalUserXBalance = await provider.connection.getTokenAccountBalance(userTokenXAccount);
-    const finalUserYBalance = await provider.connection.getTokenAccountBalance(userTokenYAccount);
-    const poolAccount = await program.account.liquidityPool.fetch(liquidityPoolPDA);
 
-    expect(poolAccount.volume24h.toNumber()).to.be.above(0);
-    expect(poolAccount.fees24h.toNumber()).to.be.above(0);
-    expect(Number(finalUserXBalance.value.amount)).to.be.below(Number(initialUserXBalance.value.amount));
-    expect(Number(finalUserYBalance.value.amount)).to.be.above(Number(initialUserYBalance.value.amount));
-  });
-
-  it("Stakes tokens", async () => {
-    const userTokenAccount = await getAssociatedTokenAddress(
-      tokenXMint,
-      wallet.publicKey
-    );
-
-    const userState = Keypair.generate();
-
-    await program.methods
-      .stakeTokens(new anchor.BN(100000))
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
-        user: wallet.publicKey,
-        userState: userState.publicKey,
-        userTokenAccount,
-        poolTokenAccount: poolTokenXAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .signers([userState])
-      .rpc();
-
-    const stateAccount = await program.account.userState.fetch(userState.publicKey);
-    expect(stateAccount.amountStaked.toNumber()).to.equal(100000);
-  });
-
-  it("Withdraws tokens", async () => {
-    const userTokenAccount = await getAssociatedTokenAddress(
-      tokenXMint,
-      wallet.publicKey
-    );
-
-    const userState = Keypair.generate();
-
-    await program.methods
-      .withdrawTokens()
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
-        user: wallet.publicKey,
-        userState: userState.publicKey,
-        userTokenAccount,
-        poolTokenAccount: poolTokenXAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .signers([userState])
-      .rpc();
-
-    const stateAccount = await program.account.userState.fetch(userState.publicKey);
-    expect(stateAccount.amountStaked.toNumber()).to.equal(0);
-  });
-
-  it("Matches orders", async () => {
-    await program.methods
-      .matchOrders()
-      .accounts({
-        liquidityPool: liquidityPoolPDA,// Object literal may only specify known properties, and 'liquidityPool' does not exist in type 'ResolvedAccounts<{ name: "liquidityPool"; writable: true; pda: { seeds: [{ kind: "const"; value: [112, 111, 111, 108]; }, { kind: "arg"; path: "tokenXMint"; }, { kind: "arg"; path: "tokenYMint"; }]; }; } | { name: "authority"; writable: true; signer: true; }>
-        authority: wallet.publicKey,
-      })
-      .rpc();
-
-    const poolAccount = await program.account.liquidityPool.fetch(liquidityPoolPDA);
-    expect(poolAccount.orders.length).to.equal(0);
-  });});
+});

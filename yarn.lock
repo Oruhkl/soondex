@@ -1056,7 +1056,7 @@ solana-bankrun-linux-x64-musl@0.4.0:
   resolved "https://registry.npmjs.org/solana-bankrun-linux-x64-musl/-/solana-bankrun-linux-x64-musl-0.4.0.tgz"
   integrity sha512-Nv328ZanmURdYfcLL+jwB1oMzX4ZzK57NwIcuJjGlf0XSNLq96EoaO5buEiUTo4Ls7MqqMyLbClHcrPE7/aKyA==
 
-"solana-bankrun@>=0.2.0 <0.5.0":
+solana-bankrun@^0.4.0, "solana-bankrun@>=0.2.0 <0.5.0":
   version "0.4.0"
   resolved "https://registry.npmjs.org/solana-bankrun/-/solana-bankrun-0.4.0.tgz"
   integrity sha512-NMmXUipPBkt8NgnyNO3SCnPERP6xT/AMNMBooljGA3+rG6NN8lmXJsKeLqQTiFsDeWD74U++QM/DgcueSWvrIg==
