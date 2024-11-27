@@ -19,13 +19,17 @@ describe("Soondex DEX", () => {
   const program = anchor.workspace.Soondex as Program<Soondex>;
   const wallet = provider.wallet as anchor.Wallet;
 
-  const getUserStateAddress = async (userPubkey: PublicKey): Promise<PublicKey> => {
+  const getUserStateAddress = async (liquidityPool: PublicKey): Promise<PublicKey> => {
     const [userStatePDA] = await PublicKey.findProgramAddress(
-      [Buffer.from("user_state"), userPubkey.toBuffer()],
-      program.programId
+        [
+            Buffer.from("user_state"),
+            liquidityPool.toBuffer(),
+            wallet.publicKey.toBuffer()
+        ],
+        program.programId
     );
     return userStatePDA;
-  };
+};
 
   let tokenXMint: PublicKey;
   let tokenYMint: PublicKey;
@@ -145,7 +149,7 @@ describe("Soondex DEX", () => {
         tokenXMint,
         tokenYMint,
         new anchor.BN(25),
-        new anchor.BN(100)
+
       )
       .accountsStrict({
         liquidityPool: liquidityPoolPDA,
@@ -164,21 +168,20 @@ describe("Soondex DEX", () => {
 
     await program.methods
       .manageAdmin(adminKeypair.publicKey, true)
-      .accounts({
+      .accountsStrict({
         liquidityPool: liquidityPoolPDA,
         authority: wallet.publicKey,
+        tokenXMint,
+        tokenYMint,
       })
       .rpc();
     console.log("✓ Setup admin");
   });
 
-
-  /* This tests below are yet to pass probably because of complexities */
   it("Add Initial Liquidity", async () => {
     console.log("\n=== Adding Initial Liquidity ==="); // 2% slippage tolerance
     const amountX = 100_000_000;
     const amountY = 100_000_000;
-    const minLpTokens = Math.floor(Math.sqrt(amountX * amountY) * 0.98);
     const params = {
         amountX: new anchor.BN(100_000_000),
         amountY: new anchor.BN(100_000_000),
@@ -187,11 +190,14 @@ describe("Soondex DEX", () => {
     
     const tx = await program.methods
       .addLiquidity(
+        tokenXMint,
+        tokenYMint,
         params.amountX,
-        params.amountY,
-        params.minLpTokens
+        params.amountY
       )
       .accountsStrict({
+        tokenXMint,
+        tokenYMint,
         liquidityPool: liquidityPoolPDA,
         user: wallet.publicKey,
         userTokenXAccount: userTokenXAccount,
@@ -228,7 +234,6 @@ describe("Soondex DEX", () => {
         user: wallet.publicKey,
         userTokenIn: userTokenXAccount,
         userTokenOut: userTokenYAccount,
-        poolTokenIn: poolTokenXAccount,
         poolTokenX: poolTokenXAccount,
         poolTokenY: poolTokenYAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -239,6 +244,188 @@ describe("Soondex DEX", () => {
     
     console.log("Swap TX:", tx);
     console.log("✓ Swap executed successfully");
+});
+
+it("Remove Liquidity", async () => {
+  console.log("\n=== Removing Liquidity ===");
+  const amount = new anchor.BN(50_000_000); // Remove half of initial liquidity
+  
+  const tx = await program.methods
+    .removeLiquidity(
+      tokenXMint,
+      tokenYMint,
+      amount,
+      amount
+    )
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      user: wallet.publicKey,
+      userTokenXAccount,
+      userTokenYAccount,
+      poolTokenXAccount,
+      poolTokenYAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      tokenXMint,
+      tokenYMint
+    })
+    .rpc();
+  
+  console.log("Remove Liquidity TX:", tx);
+});
+
+it("Stake Tokens", async () => {
+  console.log("\n=== Staking Tokens ===");
+  const stakeAmount = new anchor.BN(20_000_000);
+  
+  const userStatePDA = await getUserStateAddress(liquidityPoolPDA);
+  
+  const tx = await program.methods
+    .stake(stakeAmount)
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      userState: userStatePDA,
+      user: wallet.publicKey,
+      userTokenAccount: userTokenXAccount,
+      poolTokenAccount: poolTokenXAccount,
+      tokenMint: tokenXMint,
+      tokenXMint,
+      tokenYMint,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId
+    })
+    .rpc();
+  
+  console.log("Stake TX:", tx);
+});
+
+it("Unstake Tokens", async () => {
+  console.log("\n=== Unstaking Tokens ===");
+  const unstakeAmount = new anchor.BN(10_000_000);
+
+  const userStatePDA = await getUserStateAddress(liquidityPoolPDA);
+
+  const tx = await program.methods
+    .unstake(unstakeAmount)
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      userState: userStatePDA,
+      user: wallet.publicKey,
+      userTokenAccount: userTokenXAccount,
+      poolTokenAccount: poolTokenXAccount,
+      tokenMint: tokenXMint,
+      tokenXMint,
+      tokenYMint,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId
+    })
+    .rpc();
+
+  console.log("Unstake TX:", tx);
+});
+it("Edge Case: Attempt max possible swap", async () => {
+  console.log("\n=== Testing Edge Case: Max Swap ===");
+  const maxAmount = new anchor.BN(1_000_000_000);
+  
+  try {
+      await program.methods
+        .swapTokens(
+          tokenXMint,
+          tokenYMint,
+          maxAmount,
+          new anchor.BN(0)
+        )
+        .accountsStrict({
+          liquidityPool: liquidityPoolPDA,
+          user: wallet.publicKey,
+          userTokenIn: userTokenXAccount,
+          userTokenOut: userTokenYAccount,
+          poolTokenX: poolTokenXAccount,
+          poolTokenY: poolTokenYAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          tokenXMint,
+          tokenYMint
+        })
+        .rpc();
+      assert(false, "Expected transaction to fail");
+  } catch (e) {
+      assert(e.message.includes("InvalidSwapInput") || e.message.includes("InsufficientFunds"));
+  }
+});
+
+it("Multiple Operations Sequence", async () => {
+  console.log("\n=== Testing Operation Sequence ===");
+  
+  const poolAccount = await program.account.liquidityPool.fetch(liquidityPoolPDA);
+  
+  // Use exact pool ratios
+  const amount = new anchor.BN(10_000_000);
+  const amountY = amount
+      .mul(new anchor.BN(poolAccount.tokenYReserve))
+      .div(new anchor.BN(poolAccount.tokenXReserve));
+  
+  await program.methods
+    .addLiquidity(
+      tokenXMint,
+      tokenYMint,
+      amount,
+      amountY
+    )
+    .accountsStrict({
+      tokenXMint,
+      tokenYMint,
+      liquidityPool: liquidityPoolPDA,
+      user: wallet.publicKey,
+      userTokenXAccount,
+      userTokenYAccount,
+      poolTokenXAccount,
+      poolTokenYAccount,
+      tokenProgram: TOKEN_PROGRAM_ID
+    })
+    .rpc();
+  
+  console.log("✓ Sequential operations completed successfully");
+});
+
+
+it("Admin Management", async () => {
+  console.log("\n=== Testing Admin Management ===");
+  
+  const newAdminKeypair = Keypair.generate();
+  console.log("Generated new admin:", newAdminKeypair.publicKey.toString());
+
+  // Add new admin
+  await program.methods
+    .manageAdmin(newAdminKeypair.publicKey, true)
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      authority: wallet.publicKey,
+      tokenXMint,
+      tokenYMint,
+    })
+    .rpc();
+  console.log("✓ Added new admin successfully");
+
+  // Verify admin was added
+  const poolAfterAdd = await program.account.liquidityPool.fetch(liquidityPoolPDA);
+  assert(poolAfterAdd.admins.some(admin => admin.equals(newAdminKeypair.publicKey)), 
+    "New admin should be in the admins list");
+
+  // Remove admin
+  await program.methods
+    .manageAdmin(newAdminKeypair.publicKey, false)
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      authority: wallet.publicKey,
+      tokenXMint,
+      tokenYMint,
+    })
+    .rpc();
+  console.log("✓ Removed admin successfully");
+
+  // Verify admin was removed
+  const poolAfterRemove = await program.account.liquidityPool.fetch(liquidityPoolPDA);
+  assert(!poolAfterRemove.admins.some(admin => admin.equals(newAdminKeypair.publicKey)), 
+    "Removed admin should not be in the admins list");
 });
 
 

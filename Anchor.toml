@@ -1,15 +1,15 @@
-
 [features]
 resolution = true
 skip-lint = false
 
 [programs.localnet]
-soondex = "B4xt3vAan4S5UmUgucsxMPi2uwqEmrSSdvJnzVPWeUFu"
+soondex = "7kbSP4Bm3dzsNXiQdQ6JtZmddjr4a8EanR2nq357JP3e"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
+# cluster = "https://rpc.testnet.soo.network/rpc" 
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
