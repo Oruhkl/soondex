@@ -1,9 +1,23 @@
-use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
-use anchor_spl::associated_token;
+use anchor_lang::{
+    prelude::*,
+    system_program,
+};
+
+use anchor_spl::{
+    associated_token,
+    token::{self, SyncNative},
+    token_interface::{
+        Mint, 
+        TokenAccount, 
+        TokenInterface,
+        transfer_checked,
+        TransferChecked,
+    },
+};
+
 use crate::associated_token::AssociatedToken;
 use integer_sqrt::IntegerSquareRoot;
-use anchor_spl::token_interface::{transfer_checked, TransferChecked};
+use spl_token::native_mint::ID as NATIVE_MINT_ID;
 
 
 
@@ -13,11 +27,11 @@ pub const POOL_SEED: &[u8] = b"pool";
 pub const MAX_FEE_RATE: u64 = 5000; // 50% in basis points
 pub const TOTAL_FEE_RATE: u64 = 25; // 0.25% in basis points
 pub const PROTOCOL_FEE_LAMPORTS: u64 = 150_000_000; // 0.15 SOL in lamports
-
-declare_id!("FKczhwC9sbSnSKwG8Anp2NPsGCumTwbhABursN5a1dmX");
+declare_id!("8BPmoTqwHpFGECrtmWbDSz8wDXj5X7e32qdkLrNhQVqy");
 
 #[program]
 pub mod soondex {
+
     use super::*;
 
     pub fn initialize_pool(
@@ -345,10 +359,11 @@ pub mod soondex {
     
         Ok(())
     }
-    
+
+
     pub fn swap_tokens(
         ctx: Context<SwapTokens>,
-        input_token: Pubkey,
+        input_token: Pubkey, 
         output_token: Pubkey,
         amount_in: u64,
         minimum_amount_out: u64,
@@ -361,46 +376,59 @@ pub mod soondex {
         require!(minimum_amount_out > 0, ErrorCode::InvalidSwapInput);
         require!(input_token != output_token, ErrorCode::InvalidTokenPair);
         
-        // Pool token validation
-        require!(
-            input_token == liquidity_pool.token_x_mint || input_token == liquidity_pool.token_y_mint,
-            ErrorCode::InvalidToken
-        );
-        require!(
-            output_token == liquidity_pool.token_x_mint || output_token == liquidity_pool.token_y_mint,
-            ErrorCode::InvalidToken
-        );
-    
+        // Handle SOL validation
+        let is_sol_input = input_token == NATIVE_MINT_ID;
+        let is_sol_output = output_token == NATIVE_MINT_ID;
+        
+        // Validate tokens/SOL against pool
+        if !is_sol_input {
+            require!(
+                input_token == liquidity_pool.token_x_mint || input_token == liquidity_pool.token_y_mint,
+                ErrorCode::InvalidToken
+            );
+        }
+        if !is_sol_output {
+            require!(
+                output_token == liquidity_pool.token_x_mint || output_token == liquidity_pool.token_y_mint,
+                ErrorCode::InvalidToken
+            );
+        }
+
+        // Calculate k value
+        let k_before = liquidity_pool.token_x_reserve
+            .checked_mul(liquidity_pool.token_y_reserve)
+            .ok_or(ErrorCode::MathOverflow)?;
+
         // Determine swap direction and reserves
-        let is_input_token_x = input_token == ctx.accounts.token_x_mint.key();
+        let is_input_token_x = input_token == ctx.accounts.token_x_mint.key() || is_sol_input;
         let (input_reserve, output_reserve) = if is_input_token_x {
             (liquidity_pool.token_x_reserve, liquidity_pool.token_y_reserve)
         } else {
             (liquidity_pool.token_y_reserve, liquidity_pool.token_x_reserve)
         };
-    
+
         // Calculate amounts
         let total_fee_amount = (amount_in as u128)
             .checked_mul(TOTAL_FEE_RATE as u128)
             .ok_or(ErrorCode::MathOverflow)?
             .checked_div(10000)
             .ok_or(ErrorCode::MathOverflow)? as u64;
-    
+
         let amount_in_after_fees = amount_in
             .checked_sub(total_fee_amount)
             .ok_or(ErrorCode::MathOverflow)?;
-    
+
         let output_amount = calculate_swap_output(
             amount_in_after_fees,
             input_reserve,
             output_reserve,
         )?;
-    
+
         require!(
             output_amount >= minimum_amount_out,
             ErrorCode::ExcessiveSlippage
         );
-    
+
         // EFFECTS
         if is_input_token_x {
             liquidity_pool.token_x_reserve = liquidity_pool.token_x_reserve
@@ -417,71 +445,120 @@ pub mod soondex {
                 .checked_sub(output_amount)
                 .ok_or(ErrorCode::MathOverflow)?;
         }
-    
+
+        // Verify k value
+        let k_after = liquidity_pool.token_x_reserve
+            .checked_mul(liquidity_pool.token_y_reserve)
+            .ok_or(ErrorCode::MathOverflow)?;
+        require!(k_after >= k_before, ErrorCode::InvalidK);
+
         // INTERACTIONS
-        // Transfer input tokens
-        transfer_checked(
-            CpiContext::new(
+        if is_sol_input {
+            // Transfer SOL from user
+            system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    system_program::Transfer {
+                        from: ctx.accounts.user.to_account_info(),
+                        to: ctx.accounts.wsol_account.as_ref().unwrap().to_account_info(),
+                    }
+                ),
+                amount_in
+            )?;
+            
+            // Sync wrapped SOL account
+            token::sync_native(CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.user_token_in.to_account_info(),
-                    to: if is_input_token_x {
-                        ctx.accounts.pool_token_x.to_account_info()
-                    } else {
-                        ctx.accounts.pool_token_y.to_account_info()
+                SyncNative {
+                    account: ctx.accounts.wsol_account.as_ref().unwrap().to_account_info(),
+                }
+            ))?;
+        } else {
+            // Regular token transfer
+            transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.user_token_in.to_account_info(),
+                        to: if is_input_token_x {
+                            ctx.accounts.pool_token_x.to_account_info()
+                        } else {
+                            ctx.accounts.pool_token_y.to_account_info()
+                        },
+                        authority: ctx.accounts.user.to_account_info(),
+                        mint: if is_input_token_x {
+                            ctx.accounts.token_x_mint.to_account_info()
+                        } else {
+                            ctx.accounts.token_y_mint.to_account_info()
+                        },
                     },
-                    authority: ctx.accounts.user.to_account_info(),
-                    mint: if is_input_token_x {
-                        ctx.accounts.token_x_mint.to_account_info()
-                    } else {
-                        ctx.accounts.token_y_mint.to_account_info()
-                    },
+                ),
+                amount_in,
+                if is_input_token_x {
+                    ctx.accounts.token_x_mint.decimals
+                } else {
+                    ctx.accounts.token_y_mint.decimals
                 },
-            ),
-            amount_in,
-            if is_input_token_x {
-                ctx.accounts.token_x_mint.decimals
-            } else {
-                ctx.accounts.token_y_mint.decimals
-            },
-        )?;
-    
-        // Transfer output tokens
-        transfer_checked(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.user_token_out.to_account_info(),
-                    to: if is_input_token_x {
-                        ctx.accounts.pool_token_y.to_account_info()
-                    } else {
-                        ctx.accounts.pool_token_x.to_account_info()
+            )?;
+        }
+
+        if is_sol_output {
+            // Close WSOL account to unwrap SOL
+            token::close_account(
+                CpiContext::new(
+                    ctx.accounts.token_program.to_account_info(),
+                    token::CloseAccount {
+                        account: ctx.accounts.wsol_account.as_ref().unwrap().to_account_info(),
+                        destination: ctx.accounts.user.to_account_info(),
+                        authority: ctx.accounts.user.to_account_info(),
+                    }
+                )
+            )?;
+        } else {
+            // Regular token transfer
+            transfer_checked(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    TransferChecked {
+                        from: if is_input_token_x {
+                            ctx.accounts.pool_token_y.to_account_info()
+                        } else {
+                            ctx.accounts.pool_token_x.to_account_info()
+                        },
+                        to: ctx.accounts.user_token_out.to_account_info(),
+                        authority: liquidity_pool.to_account_info(),
+                        mint: if is_input_token_x {
+                            ctx.accounts.token_y_mint.to_account_info()
+                        } else {
+                            ctx.accounts.token_x_mint.to_account_info()
+                        },
                     },
-                    authority: ctx.accounts.user.to_account_info(),
-                    mint: if is_input_token_x {
-                        ctx.accounts.token_y_mint.to_account_info()
-                    } else {
-                        ctx.accounts.token_x_mint.to_account_info()
-                    },
+                    &[&[
+                        b"pool",
+                        ctx.accounts.token_x_mint.key().as_ref(),
+                        ctx.accounts.token_y_mint.key().as_ref(),
+                        &[liquidity_pool.bump]
+                    ]]
+                ),
+                output_amount,
+                if is_input_token_x {
+                    ctx.accounts.token_y_mint.decimals
+                } else {
+                    ctx.accounts.token_x_mint.decimals
                 },
-            ),
-            output_amount,
-            if is_input_token_x {
-                ctx.accounts.token_y_mint.decimals
-            } else {
-                ctx.accounts.token_x_mint.decimals
-            },
-        )?;
-    
+            )?;
+            
+        }
+
         emit!(TokensSwapped {
             input_token: input_token.to_string(),
             input_amount: amount_in,
             output_amount,
         });
-    
+
         Ok(())
     }
-    
+
     pub fn remove_liquidity(
         ctx: Context<RemoveLiquidity>,
         token_x_mint: Pubkey,
@@ -772,7 +849,7 @@ pub mod soondex {
     });
 
     Ok(())
-}
+    }
     
 }
 
@@ -907,7 +984,6 @@ pub struct RemoveLiquidity<'info> {
 }
 
 
-
 #[derive(Accounts)]
 #[instruction(input_token: Pubkey, output_token: Pubkey, amount_in: u64, minimum_amount_out: u64)]
 pub struct SwapTokens<'info> {
@@ -921,21 +997,36 @@ pub struct SwapTokens<'info> {
         bump = liquidity_pool.bump
     )]
     pub liquidity_pool: Account<'info, LiquidityPool>,
+    
     #[account(mut)]
     pub user: Signer<'info>,
+    
     #[account(mut)]
     pub user_token_in: InterfaceAccount<'info, TokenAccount>,
+    
     #[account(mut)]
     pub user_token_out: InterfaceAccount<'info, TokenAccount>,
+    
     #[account(mut)]
     pub pool_token_x: InterfaceAccount<'info, TokenAccount>,
+    
     #[account(mut)]
     pub pool_token_y: InterfaceAccount<'info, TokenAccount>,
+    
     pub token_program: Interface<'info, TokenInterface>,
+    
     pub token_x_mint: InterfaceAccount<'info, Mint>,
+    
     pub token_y_mint: InterfaceAccount<'info, Mint>,
+    
+    #[account(mut)]
+    pub wsol_account: Option<InterfaceAccount<'info, TokenAccount>>,
+    
+    pub system_program: Program<'info, System>,
+    
+    /// CHECK: Native mint is a static known address
+    pub native_mint: UncheckedAccount<'info>,
 }
-
 
 #[derive(Accounts)]
 #[instruction(amount: u64)]
@@ -1220,6 +1311,9 @@ pub enum ErrorCode {
 
     #[msg("Pool is not empty")]
     PoolNotEmpty,
+
+    #[msg("Invalid K value after swap")]
+    InvalidK,
 }
 
 impl LiquidityPool {

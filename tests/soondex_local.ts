@@ -8,6 +8,7 @@ import {
   getAssociatedTokenAddress,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
+  NATIVE_MINT,
   mintTo,
   getAccount,
 } from "@solana/spl-token";
@@ -232,19 +233,73 @@ describe("Soondex DEX", () => {
       .accountsStrict({
         liquidityPool: liquidityPoolPDA,
         user: wallet.publicKey,
-        userTokenIn: userTokenXAccount,
+        userTokenIn: userTokenXAccount, 
         userTokenOut: userTokenYAccount,
         poolTokenX: poolTokenXAccount,
         poolTokenY: poolTokenYAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
         tokenXMint,
-        tokenYMint
+        tokenYMint,
+        wsolAccount: null,
+        systemProgram: SystemProgram.programId,
+        nativeMint: NATIVE_MINT
       })
+      .signers([wallet.payer])
       .rpc();
     
     console.log("Swap TX:", tx);
     console.log("✓ Swap executed successfully");
 });
+
+it("SOL/Token Swap", async () => {
+  console.log("\n=== Testing SOL/Token Swap ===");
+  
+  // Amount of SOL to swap
+  const solAmount = new anchor.BN(1_000_000_000); // 1 SOL
+  const minTokenOut = new anchor.BN(900_000_000); // Minimum tokens expected
+  
+  // Get initial balances
+  const initialTokenBalance = await getAccount(
+    provider.connection,
+    userTokenYAccount
+  );
+  const initialSolBalance = await provider.connection.getBalance(wallet.publicKey);
+
+  const tx = await program.methods
+    .swapTokens(
+      NATIVE_MINT,
+      tokenYMint,
+      solAmount,
+      minTokenOut
+    )
+    .accountsStrict({
+      liquidityPool: liquidityPoolPDA,
+      user: wallet.publicKey,
+      userTokenIn: userTokenXAccount, 
+      userTokenOut: userTokenYAccount,
+      poolTokenX: poolTokenXAccount,
+      poolTokenY: poolTokenYAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      tokenXMint,
+      tokenYMint,
+      wsolAccount: null,
+      systemProgram: SystemProgram.programId,
+      nativeMint: NATIVE_MINT
+    })
+
+  // Get final balances
+  const finalTokenBalance = await getAccount(
+    provider.connection,
+    userTokenYAccount
+  );
+  const finalSolBalance = await provider.connection.getBalance(wallet.publicKey);
+
+  console.log("SOL/Token Swap TX:", tx);
+  console.log("SOL spent:", (initialSolBalance - finalSolBalance) / anchor.web3.LAMPORTS_PER_SOL, "SOL");
+  console.log("Tokens received:", Number(finalTokenBalance.amount) - Number(initialTokenBalance.amount));
+  console.log("✓ SOL/Token swap executed successfully");
+});
+
 
 it("Remove Liquidity", async () => {
   console.log("\n=== Removing Liquidity ===");
@@ -342,10 +397,13 @@ it("Edge Case: Attempt max possible swap", async () => {
           poolTokenX: poolTokenXAccount,
           poolTokenY: poolTokenYAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
-          tokenXMint,
-          tokenYMint
-        })
-        .rpc();
+          tokenXMint: tokenXMint,
+          tokenYMint: tokenYMint,
+          systemProgram: SystemProgram.programId,
+          nativeMint: NATIVE_MINT,
+          wsolAccount: null
+      })
+      .rpc();
       assert(false, "Expected transaction to fail");
   } catch (e) {
       assert(e.message.includes("InvalidSwapInput") || e.message.includes("InsufficientFunds"));

@@ -27,6 +27,9 @@ integer-sqrt = "0.1.5"
 solana-program = "1.16.0"
 borsh = "1.5.1"
 borsh-derive = "1.5.1"
+spl-token-2022 = "0.9"
+spl-token = { version = "3.5", features = ["no-entrypoint"] }
+
 
 [dev-dependencies]
 assert_matches = "1.5.0"

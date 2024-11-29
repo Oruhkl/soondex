@@ -5,7 +5,7 @@
  * IDL can be found at `target/idl/soondex.json`.
  */
 export type Soondex = {
-  "address": "FKczhwC9sbSnSKwG8Anp2NPsGCumTwbhABursN5a1dmX",
+  "address": "8BPmoTqwHpFGECrtmWbDSz8wDXj5X7e32qdkLrNhQVqy",
   "metadata": {
     "name": "soondex",
     "version": "0.1.0",
@@ -674,6 +674,18 @@ export type Soondex = {
         },
         {
           "name": "tokenYMint"
+        },
+        {
+          "name": "wsolAccount",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "nativeMint"
         }
       ],
       "args": [
@@ -1044,6 +1056,11 @@ export type Soondex = {
       "code": 6018,
       "name": "poolNotEmpty",
       "msg": "Pool is not empty"
+    },
+    {
+      "code": 6019,
+      "name": "invalidK",
+      "msg": "Invalid K value after swap"
     }
   ],
   "types": [

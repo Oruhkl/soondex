@@ -3,15 +3,15 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-soondex = "7kbSP4Bm3dzsNXiQdQ6JtZmddjr4a8EanR2nq357JP3e"
+soondex = "8BPmoTqwHpFGECrtmWbDSz8wDXj5X7e32qdkLrNhQVqy"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-# cluster = "https://rpc.testnet.soo.network/rpc" 
-cluster = "localnet"
+cluster = "https://rpc.testnet.soo.network/rpc" 
+# cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "pnpm exec ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
