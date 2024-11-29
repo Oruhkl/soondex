@@ -71,7 +71,7 @@ Soondex is a decentralized liquidity pool protocol built on the Solana blockchai
 This project is licensed under the MIT License
 
 ## Contact
-For any questions or inquiries, please contact [Oraku](mailto:bigdataorakul@gmail.com).
+For any questions or inquiries, please contact [Orakul](mailto:bigdataorakul@gmail.com).
 
 ## Acknowledgments
 - [Solana](https://solana.com/)
