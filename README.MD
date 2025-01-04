@@ -1,6 +1,6 @@
-# Soondex Protocol
+# Dex Protocol
 
-Soondex is a decentralized liquidity pool protocol built on the Solana blockchain, enabling users to create liquidity pools, swap tokens, provide liquidity, and stake their assets for rewards. This README provides an overview of the implementation, features, and components of the Soondex protocol.
+Dex is a decentralized liquidity pool protocol built on the Solana blockchain, enabling users to create liquidity pools, swap tokens, provide liquidity, and stake their assets for rewards. This README provides an overview of the implementation, features, and components of the Soondex protocol.
 
 ## Features
 
